@@ -1,0 +1,241 @@
+from "%darg/ui_imports.nut" import *
+from "string" import regexp, split
+
+/*
+  todo:
+    - somehow provide result of validation - maybe more complex type of inputState, like Watched({text=text isValid=true}))
+    - important to know about language and CapsLock. The easiest way - show last symbol in password for 0.25 seconds before hide it with *
+
+    - replace editor in enlisted with this component (it should be already suitable)
+*/
+local rexInt = regexp(@"[\+\-]?[0-9]+")
+local function isStringInt(str){
+  return rexInt.match(str) //better use one from string.nut
+}
+
+local rexFloat = regexp(@"(\+|-)?([0-9]+\.?[0-9]*|\.[0-9]+)([eE](\+|-)?[0-9]+)?")
+local function isStringFloat(str){
+  return rexFloat.match(str) //better use one from string.nut
+}
+
+local rexEng = regexp(@"[a-z,A-Z]*")
+local function isStringEng(str){
+  return rexEng.match(str)
+}
+local function isStringLikelyEmail(str, verbose=true) {
+// this check is not rfc fully compatible. We check that @ exist and correctly used, and that local and domain parts exist and they are correct length.
+// Domain part also have at least one period and main domain at least 2 symbols
+// also come correct emails on google are against RFC, for example a.a.a@gmail.com.
+
+  if (type(str)!="string")
+    return false
+  local splitted = split(str,"@")
+  if (splitted.len()<2)
+    return false
+  local locpart = splitted[0]
+  if (splitted.len()>2)
+    locpart = "@".join(splitted.slice(0,-1))
+  if (locpart.len()>64)
+    return false
+  local dompart = splitted[splitted.len()-1]
+  if (dompart.len()>253 || dompart.len()<4) //RFC + domain should be at least x.xx
+    return false
+  local quotes = locpart.indexof("\"")
+  if (quotes && quotes!=0)
+    return false //quotes only at the begining
+  if (quotes==null && locpart.indexof("@")!=null)
+    return false //no @ without quotes
+  if (dompart.indexof(".")==null || dompart.indexof(".")>dompart.len()-3) // warning disable: -func-can-return-null
+    return false  //too short first level domain or no periods
+  return true
+}
+
+local function defaultFrame(inputObj, group, sf) {
+  return {
+    rendObj = ROBJ_FRAME
+    borderWidth = [hdpx(1), hdpx(1), 0, hdpx(1)]
+    size = [flex(), SIZE_TO_CONTENT]
+    color = (sf & S_KB_FOCUS) ? Color(180, 180, 180) : Color(120, 120, 120)
+    group = group
+
+    children = {
+      rendObj = ROBJ_FRAME
+      borderWidth = [0, 0, hdpx(1), 0]
+      size = [flex(), SIZE_TO_CONTENT]
+      color = (sf & S_KB_FOCUS) ? Color(250, 250, 250) : Color(180, 180, 180)
+      group = group
+
+      children = inputObj
+    }
+  }
+}
+
+local function isValidStrByType(str, inputType) {
+  if (str=="")
+    return true
+  if (inputType=="mail")
+     return isStringLikelyEmail(str)
+  if (inputType=="num")
+     return isStringInt(str) || isStringFloat(str)
+  if (inputType=="integer")
+     return isStringInt(str)
+  if (inputType=="float")
+     return isStringFloat(str)
+  if (inputType=="lat")
+     return isStringEng(str)
+  return true
+}
+
+local defaultColors = {
+  placeHolderColor = Color(80, 80, 80, 80)
+  textColor = Color(255,255,255)
+  backGroundColor = Color(28, 28, 28, 150)
+  highlightFailure = Color(255,60,70)
+}
+
+
+local failAnim = @(trigger) {
+  prop = AnimProp.color
+  from = defaultColors.highlightFailure
+  easing = OutCubic
+  duration = 1.0
+  trigger = trigger
+}
+
+local interactiveValidTypes = ["num","lat","integer","float"]
+
+local function textInput(text_state, options={}, frameCtor=defaultFrame) {
+  local group = ElemGroup()
+  local {
+    setValue = @(v) text_state(v), inputType = null,
+    placeholder = null, showPlaceHolderOnFocus = false, password = null, maxChars = null,
+    title = null, font = null, fontSize = null, colors = {}, hotkeys = null,
+    size = [flex(), fontH(100)], textmargin = [sh(1), sh(0.5)], valignText = ALIGN_BOTTOM,
+    margin = [sh(1), 0], padding = 0, borderRadius = hdpx(3), valign = ALIGN_CENTER,
+    xmbNode = null, imeOpenJoyBtn = null,
+
+    //handlers
+    isValidResult = null, isValidChange = null, onBlur = null, onReturn = null,
+    onEscape = @() set_kb_focus(null), onChange = null, onFocus = null, onAttach = null,
+    onHover = null, onImeFinish = null
+  } = options
+  colors = defaultColors.__merge(colors)
+
+  isValidResult = isValidResult ?? @(new_value) isValidStrByType(new_value, inputType)
+  isValidChange = isValidChange
+    ?? @(new_value) interactiveValidTypes.indexof(inputType) == null
+      || isValidStrByType(new_value, inputType)
+
+  local stateFlags = Watched(0)
+
+  local function onBlurExt() {
+    if (!isValidResult(text_state.value))
+      anim_start(text_state)
+    onBlur?()
+  }
+
+  local function onReturnExt(){
+    if (!isValidResult(text_state.value))
+      anim_start(text_state)
+    onReturn?()
+  }
+
+  local function onEscapeExt(){
+    if (!isValidResult(text_state.value))
+      anim_start(text_state)
+    onEscape()
+  }
+
+  local function onChangeExt(new_val) {
+    onChange?(new_val)
+    if (!isValidChange(new_val))
+      anim_start(text_state)
+    else
+      setValue(new_val)
+  }
+
+  local placeholderObj = null
+  if (placeholder != null) {
+    local phBase = {
+      text = placeholder
+      rendObj = ROBJ_DTEXT
+      font
+      fontSize
+      color = colors.placeHolderColor
+      animations = [failAnim(text_state)]
+      margin = [0, sh(0.5)]
+    }
+    placeholderObj = placeholder instanceof Watched
+      ? @() phBase.__update({ watch = placeholder, text = placeholder.value })
+      : phBase
+  }
+
+  local inputObj = @() {
+    watch = [text_state, stateFlags]
+    rendObj = ROBJ_DTEXT
+    behavior = Behaviors.TextInput
+
+    size
+    font
+    fontSize
+    color = colors.textColor
+    group
+    margin = textmargin
+    valign = valignText
+
+    animations = [failAnim(text_state)]
+
+    text = text_state.value
+    title
+    inputType = inputType
+    password = password
+    key = text_state
+
+    maxChars
+    hotkeys
+
+    onChange = onChangeExt
+
+    onFocus
+    onBlur   = onBlurExt
+    onAttach
+    onReturn = onReturnExt
+    onEscape = onEscapeExt
+    onHover
+    onImeFinish
+    xmbNode
+    imeOpenJoyBtn
+
+    children = (text_state.value?.len() ?? 0)== 0
+        && (showPlaceHolderOnFocus || !(stateFlags.value & S_KB_FOCUS))
+      ? placeholderObj
+      : null
+  }
+
+  return @() {
+    watch = [stateFlags]
+    onElemState = @(sf) stateFlags(sf)
+    margin
+    padding
+
+    rendObj = ROBJ_BOX
+    fillColor = colors.backGroundColor
+    borderWidth = 0
+    borderRadius
+    clipChildren = true
+    size = [flex(), SIZE_TO_CONTENT]
+    group = group
+    animations = [failAnim(text_state)]
+    valign
+
+    children = frameCtor(inputObj, group, stateFlags.value)
+  }
+}
+
+
+local export = class{
+  defaultColors = defaultColors
+  _call = @(self, text_state, options = {}, frameCtor = defaultFrame) textInput(text_state, options, frameCtor)
+}()
+
+return export
